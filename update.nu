@@ -1,15 +1,41 @@
-let version = http get https://api.github.com/repos/angall1/CSVMusic/releases/latest 
-| get tag_name 
-| str replace 'v' ''
 
-let url = $"https://github.com/angall1/CSVMusic/releases/download/v($version)/CSVMusic-linux.zip"
+let repo = "angall1/CSVMusic"
+let file = "default.nix"
 
-let hash = nix-prefetch-url $url --type sha256
-| nix hash convert --hash-algo sha256 $in
+let headers = if ($env.GITHUB_TOKEN? | is-empty) {
+  {}
+} else {
+  { Authorization: $"Bearer ($env.GITHUB_TOKEN)" }
+}
 
-cat ./default.nix
-| split row "\""
-| update 3 $version
-| update 7 $hash
-| str join "\""
-| save default.nix -f
+let tag = http get --headers $headers $"https://api.github.com/repos/($repo)/releases/latest"
+  | get tag_name
+let version = $tag | str trim --left --char 'v'
+
+if not ($version =~ '^\d+(\.\d+)+$') {
+  error make { msg: $"Unexpected tag format: ($tag)" }
+}
+
+let current = open --raw $file
+  | parse --regex 'version = "(?<v>[^"]+)";'
+  | get 0.v
+
+if $current == $version {
+  print $"Already at ($version), nothing to do"
+  exit 0
+}
+
+print $"Updating ($current) -> ($version)"
+
+let url = $"https://github.com/($repo)/releases/download/($tag)/CSVMusic-linux.zip"
+let hash = nix store prefetch-file --json $url | from json | get hash
+
+let updated = open --raw $file
+  | str replace --regex 'version = "[^"]+";' $'version = "($version)";'
+  | str replace --regex 'hash = "[^"]+";' $'hash = "($hash)";'
+
+if not (($updated | str contains $version) and ($updated | str contains $hash)) {
+  error make { msg: "Replacement failed, default.nix layout may have changed" }
+}
+
+$updated | save --force $file
